@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SparrowStudio — MIDI Editor</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <main class="main-layout">
+        <!-- ===== 顶部控制面板: 参数输入 ===== -->
+        <aside class="left-panel">
+            <div class="top-bar">
+                <h1>SparrowStudio <span class="h1-sub">· MIDI Editor</span></h1>
+                <div class="status" id="status">准备就绪。</div>
+            </div>
+            <div class="buttons">
+                <button class="ok" id="play-button">播放</button>
+                <button id="pause-button">暂停</button>
+                <button id="restart-button">从头开始</button>
+                <button id="stop-button">停止</button>
+                <button id="clear-button" class="danger">清空</button>
+                <button type="button" id="import-button">打开 MIDI</button>
+                <button id="save-midi-button">保存 MIDI</button>
+                <input id="import-file" type="file" accept=".mid,.midi">
+            </div>
+            <div class="params">
+                <label>曲谱 ID<input id="song-id" value="mySong" data-tip="曲谱 ID：保存 MIDI 文件的文件名，也是编辑器内播放用的标识名">
+                    <small class="param-hint">保存的文件名与播放标识名</small>
+                </label>
+                <label>曲名<input id="song-name" value="我的曲谱" data-tip="曲名：仅用于显示">
+                    <small class="param-hint">只用于显示</small>
+                </label>
+                <label>BPM<input id="song-tempo" type="number" min="30" max="240" value="96" data-tip="BPM：每分钟节拍数，控制曲谱速度">
+                    <small class="param-hint">控制音乐速度（每分钟节拍数）</small>
+                </label>
+                <label>小节步数<input id="step-count" type="number" min="4" max="64" value="16" data-tip="小节步数：每个小节有多少个格子">
+                    <small class="param-hint">每个小节有多少个格子</small>
+                </label>
+                <label>小节数量<input id="bar-count" type="number" min="1" max="100" value="1" data-tip="小节数量：曲谱包含多少个小节">
+                    <small class="param-hint">曲谱包含多少个小节</small>
+                </label>
+                <label>音轨数量<input id="track-count" type="number" min="1" max="32" value="3" data-tip="音轨数量：同时播放几条乐器线">
+                    <small class="param-hint">同时播放几条乐器线</small>
+                </label>
+                <label>默认节拍<input id="default-beats" type="number" min="0.25" max="8" step="0.25" value="1" data-tip="默认节拍：空格子的休止长度">
+                    <small class="param-hint">空格子的休止长度</small>
+                </label>
+                <label>音量<input id="song-volume" type="number" min="0" max="2000" step="0.1" value="2.5" data-tip="音量：整首曲子的响度，建议 1 以上为正常可听">
+                    <small class="param-hint">整首曲子的大小，建议 1 以上为正常可听</small>
+                </label>
+                <label>淡入秒数<input id="song-fade-in" type="number" min="0" max="5" step="0.1" value="0.5" data-tip="淡入秒数：开始播放时渐强的时间（仅 JS 导出有效，MIDI 不支持）">
+                    <small class="param-hint">开始播放时渐强的时间（仅 JS 导出有效，MIDI 不支持）</small>
+                </label>
+                <label>循环播放
+                    <select id="song-loop" data-tip="循环播放：曲谱结束后是否从头继续">
+                        <option value="true" selected>是</option>
+                        <option value="false">否</option>
+                    </select>
+                    <small class="param-hint">曲谱结束后是否从头继续</small>
+                </label>
+            </div>
+        </aside>
+
+        <!-- ===== 下方音轨编辑 ===== -->
+        <section class="right-panel">
+            <div class="editor-section">
+                <div class="bar-nav">
+                    <span class="bar-label">小节</span>
+                    <div class="bar-tabs" id="bar-tabs"></div>
+                </div>
+                <div class="editor-scroll" id="editor-scroll">
+                    <div class="editor-body" id="editor-body"></div>
+                </div>
+                <p class="hint">每一条音轨是一列，从上往下推进。方格内可直接输入 <strong>音名</strong>（如 C5、F#4，留空为休止）、<strong>节拍</strong> 与 <strong>音量</strong>（可留空用音色默认值）；点击左侧步数可跳转到该步播放。音轨名、音色与 gate 在列顶直接编辑。</p>
+            </div>
+        </section>
+    </main>
+
+    <!-- 自定义确认弹窗 -->
+    <div class="modal-overlay" id="confirm-overlay">
+        <div class="modal">
+            <h3 class="modal-title" id="confirm-title">确认</h3>
+            <p class="modal-body" id="confirm-body"></p>
+            <div class="modal-buttons">
+                <button id="confirm-cancel">取消</button>
+                <button class="danger" id="confirm-ok">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 基础依赖层 core/ + 音色层 instruments/（顺序即依赖顺序） -->
+    <script src="../core/audio-core.js"></script>
+    <script src="../core/note-parser.js"></script>
+    <script src="../instruments/instruments.js"></script>
+    <script src="../core/synth.js"></script>
+    <script src="../core/sequencer.js"></script>
+    <script src="../core/sfx-player.js"></script>
+    <script src="../core/midi-parser.js"></script>
+    <script src="../core/audio-manager.js"></script>
+    <script src="../instruments/sfx-library.js"></script>
+    <!-- 编辑器模块（main.js 必须最后加载） -->
+    <script src="shared.js"></script>
+    <script src="ui.js"></script>
+    <script src="state.js"></script>
+    <script src="grid.js"></script>
+    <script src="song.js"></script>
+    <script src="playback.js"></script>
+    <script src="io.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>
