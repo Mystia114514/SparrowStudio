@@ -30,8 +30,8 @@
             const sol = this.solfegeToFrequency(note);
             if (sol != null) return sol;
 
-            // 字母 + 任意个同向变音记号（#.. 或 b..）+ 八度数字。
-            const match = String(note).trim().match(/^([A-Ga-g])(#+|b+)?(-?\d)$/);
+            // 字母 + 任意个同向变音记号（#.. 或 b..）+ 八度数字（可多位，如 C10）。
+            const match = String(note).trim().match(/^([A-Ga-g])(#+|b+)?(-?\d+)$/);
             if (!match) return 0;
 
             const name = match[1].toUpperCase();
@@ -53,7 +53,7 @@
         // 唱名记法 → 频率。格式：Do/Re/Mi/Fa/Sol/So/La/Ti/Si，可带 #/b，
         // 可选八度数字；未写八度时默认落中音 Do4(=C4)。无法识别返回 null。
         solfegeToFrequency(note) {
-            const match = String(note).trim().match(/^(do|re|mi|fa|sol|so|la|ti|si)(#+|b+)?(-?\d)?$/i);
+            const match = String(note).trim().match(/^(do|re|mi|fa|sol|so|la|ti|si)(#+|b+)?(-?\d+)?$/i);
             if (!match) return null;
 
             const letter = SOLFEGE_NOTE[match[1].toLowerCase()];

@@ -9,7 +9,10 @@
     "use strict";
 
     const Synth = {
-        instruments: { ...global.SparrowDefaultInstruments },
+        /* 不在加载期快照默认音色表：instruments.js 若晚于本文件加载，
+           resolveInstrument 会延迟到 global.SparrowDefaultInstruments 上查找，
+           避免加载顺序错误导致全部音符静默退化为默认正弦参数 */
+        instruments: {},
 
         registerInstrument(id, config) {
             if (!id || !config) return;
@@ -33,7 +36,9 @@
 
             const instrument = this.resolveInstrument(options?.instrument, options);
             const startTime = Math.max(core.now(), Number(options?.startTime) || core.now());
-            const duration = Math.max(0.01, Number(options?.duration) || 0.25);
+            /* duration 允许 0（最短音）：只有未提供/非数值时才用缺省，不能把 0 当缺省 */
+            const rawDuration = Number(options?.duration);
+            const duration = Math.max(0.01, Number.isFinite(rawDuration) ? rawDuration : 0.25);
             const release = Math.max(0.01, Number(instrument.release) || 0.08);
             const stopTime = startTime + duration + release + 0.03;
 
@@ -49,7 +54,10 @@
 
         createToneNodes(options) {
             const core = global.SparrowCore;
-            const startTime = options.startTime;
+            /* 起始时刻不允许在过去：osc.start(过去时刻) 会立即起振，包络/滤波器
+               automation 也会被钳到当前值（电平跳变咔哒）。调度器停顿追赶等
+               场景仍可能送入略过期时刻，统一钳到当前——最多轻微迟到，绝不齐爆 */
+            const startTime = Math.max(core.now(), Number(options.startTime) || 0);
             const duration = options.duration;
             const instrument = options.instrument;
             const stopTime = options.stopTime || startTime + duration + Math.max(0.01, Number(instrument.release) || 0.08) + 0.03;
@@ -59,6 +67,10 @@
             const oscillatorDefs = Array.isArray(instrument.oscillators) && instrument.oscillators.length
                 ? instrument.oscillators
                 : [{ wave: instrument.wave || "sine", gain: 1, detune: 0, octave: 0 }];
+            /* 频率上限：极高音（导入 MIDI 可达 G9≈12.5kHz）叠加 +1/+2 八度泛音后
+               超过奈奎斯特频率，带限振荡器折返会产生刺耳的不可谐音失真；
+               钳到采样率的 0.45 倍（留出过渡带） */
+            const maxFreq = (core.ctx.sampleRate || 48000) * 0.45;
 
             filter.type = instrument.filterType || "lowpass";
             filter.frequency.setValueAtTime(Number(instrument.filter) || 20000, startTime);
@@ -77,7 +89,7 @@
                 const gain = Number.isFinite(Number(def.gain)) ? Number(def.gain) : 1 / oscillatorDefs.length;
 
                 osc.type = def.wave || instrument.wave || "sine";
-                osc.frequency.setValueAtTime(options.freq * ratio, startTime);
+                osc.frequency.setValueAtTime(Math.min(options.freq * ratio, maxFreq), startTime);
                 osc.detune.setValueAtTime((Number(instrument.detune) || 0) + (Number(def.detune) || 0), startTime);
                 mix.gain.setValueAtTime(Math.max(0, gain), startTime);
                 osc.connect(mix);
@@ -172,8 +184,12 @@
         },
 
         resolveInstrument(id, overrides) {
-            const base = this.instruments[id] || this.instruments.piano;
-            return { ...base, ...(overrides || {}) };
+            /* 查找顺序：registerInstrument 注册的自定义音色 → 默认音色表 → 回退 piano。
+               默认表在每次解析时从全局现取（而非加载期快照），兼容任意加载顺序 */
+            const defaults = global.SparrowDefaultInstruments || {};
+            const base = { ...(defaults.piano || {}), ...((id && defaults[id]) || {}) };
+            const custom = (id && this.instruments[id]) || {};
+            return { ...base, ...custom, ...(overrides || {}) };
         },
 
         applyEnvelope(param, startTime, duration, instrument) {
@@ -188,11 +204,30 @@
             const sustainLevel = volume * sustain;
             const noteEnd = startTime + duration;
 
+            /* 包络各阶段按时值等比压缩：短音符（时值 < attack+decay）的 attack/decay
+               不再越过 noteEnd，release 始终从 noteEnd 起。否则 automation 事件
+               时间乱序/滞后——慢起音音色（strings/choir/synthPad 等）短音符拖影
+               糊过后续音符，release 较短的音色（bass 等）还会出现结尾电平跳变咔哒 */
+            let attackTime = attack;
+            let decayTime = decay;
+            if (attackTime + decayTime > duration) {
+                const scale = duration / (attackTime + decayTime);
+                attackTime = Math.max(0.001, attackTime * scale);
+                decayTime = Math.max(0.001, decayTime * scale);
+                if (attackTime + decayTime > duration) {
+                    /* 极短音符兜底：两阶段各占一半，保证事件时间严格单调 */
+                    attackTime = duration / 2;
+                    decayTime = duration / 2;
+                }
+            }
+
             param.cancelScheduledValues(startTime);
             param.setValueAtTime(0.0001, startTime);
-            param.linearRampToValueAtTime(volume, startTime + attack);
-            param.linearRampToValueAtTime(sustainLevel, startTime + attack + decay);
-            param.setValueAtTime(sustainLevel, Math.max(startTime + attack + decay, noteEnd));
+            param.linearRampToValueAtTime(volume, startTime + attackTime);
+            param.linearRampToValueAtTime(sustainLevel, startTime + attackTime + decayTime);
+            /* 锚定 release 起点：指数衰减必须从 noteEnd 的当前值出发，
+               而非从 attack/decay 末事件时刻起斜率错乱 */
+            param.setValueAtTime(sustainLevel, noteEnd);
             param.exponentialRampToValueAtTime(0.0001, noteEnd + release);
         }
     };

@@ -40,7 +40,13 @@
                 console.warn("Sparrow: 未找到 BGM：", id);
                 return false;
             }
-            if (this.currentBgm === id && global.SparrowSequencer.playing) return true;
+            /* 幂等保护仅针对无参调用（游戏循环里重复 playBgm 不重启）；
+               播放中与暂停中都算"进行中"——暂停态放行会让每帧调用把曲子
+               反复拉回开头。带选项（startBeat/volume/loop…）的调用视为明确的
+               播放意图照常生效；曲子自然播完后（currentSong 为 null）重新播放 */
+            const hasOptions = !!options && Object.keys(options).length > 0;
+            if (this.currentBgm === id && !hasOptions
+                && (global.SparrowSequencer.playing || global.SparrowSequencer.currentSong)) return true;
             this.currentBgm = id;
             return global.SparrowSequencer.play(song, options || {});
         },

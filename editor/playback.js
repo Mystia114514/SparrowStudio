@@ -1,177 +1,183 @@
 /**
- * Sparrow Editor - playback（播放控制与播放头）
- * 通过 SparrowMusicManager 驱动引擎播放/暂停/停止/跳转；
- * 播放头按 BPM 与每格节拍推进高亮，跨小节仅切换导航高亮不重建 DOM。
+ * Sparrow Editor - playback（播放控制与播放头，按拍计时）
+ * 播放 = buildSong() 即时构建曲谱注册进曲谱库后走引擎调度器；
+ * 播放头按 AudioContext 时钟推进（拍），overlay 动画帧重绘；
+ * 从任意拍起播走引擎 startBeat（各轨光标按拍定位，保持对齐）。
  */
 
-/* ===== 播放头状态 ===== */
-let playheadRAF = null;
-let playStartTime = 0;
+let playState = "stopped"; /* "stopped" | "playing" | "paused" */
+let playStartAudioTime = 0;
+let playStartBeat = 0;
 let playTempo = 96;
 let playLoop = true;
-let currentPlayStep = -1;
-let playStartBeatOffset = 0;
-let playState = "stopped"; /* "stopped" | "playing" | "paused" */
+let playTotalBeats = 16;
+let playheadPos = -1;      /* 当前播放头拍位，停止为 -1 */
+let pausedBeat = 0;
+let pausedSong = null;     /* 暂停时曲谱快照：恢复时对比判断数据是否被编辑过 */
 
-function getTotalBeats() {
-    const track = state.tracks[0];
-    if (!track) return 0;
-    const db = Number(els.defaultBeats.value) || 1;
-    return track.cells.reduce((sum, c) => sum + (Number(c.beats) > 0 ? c.beats : db), 0);
+function playheadBeat() {
+    return playheadPos;
 }
 
-function beatsBeforeStep(stepIndex) {
-    const track = state.tracks[0];
-    if (!track) return 0;
-    const db = Number(els.defaultBeats.value) || 1;
-    let sum = 0;
-    const n = Math.max(0, Math.min(stepIndex, track.cells.length));
-    for (let i = 0; i < n; i++) {
-        sum += Number(track.cells[i].beats) > 0 ? track.cells[i].beats : db;
+/* ===== 走带 UI（音乐播放器样式）===== */
+let seekDragging = false; /* 拖动进度条期间暂停 rAF 回写，避免互相覆盖 */
+
+function beatsToClock(beats) {
+    /* 播放/暂停中按音频实际使用的 tempo 换算：输入框改 BPM 不影响正在播放的曲子
+       （tempo 在 playFromBeat 时已定格进曲谱），显示必须与听到的内容一致；
+       停止状态按输入框 BPM 预览曲长 */
+    const bpm = playState === "stopped" ? (Number(els.tempo.value) || 96) : playTempo;
+    const sec = Math.max(0, beats) * 60 / Math.max(1, bpm);
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return m + ":" + String(s).padStart(2, "0");
+}
+
+function updateTransportUI() {
+    const total = getTotalBeats();
+    const pos = playheadPos < 0 ? 0 : Math.min(playheadPos, total);
+    els.timeDisplay.textContent = beatsToClock(pos) + " / " + beatsToClock(total);
+    if (!seekDragging) {
+        els.seekBar.value = total > 0 ? Math.round(pos / total * 1000) : 0;
     }
-    return sum;
+    els.playButton.textContent = playState === "playing" ? "⏸" : "▶";
 }
 
-function startPlayhead(fromStep) {
-    const song = buildSong();
-    playTempo = song.tempo;
-    playLoop = song.loop;
-    const track = state.tracks[0];
-    const startIdx = track ? Math.max(0, Math.min(fromStep || 0, track.cells.length - 1)) : 0;
-    playStartBeatOffset = beatsBeforeStep(startIdx);
-    playStartTime = SparrowCore.now();
-    currentPlayStep = startIdx;
-    updatePlayheadUI(startIdx);
-    runPlayheadTick();
-}
-
-function runPlayheadTick() {
-    if (playheadRAF) cancelAnimationFrame(playheadRAF);
-    const tick = () => {
-        const now = SparrowCore.now();
-        const elapsed = now - playStartTime;
-        const beatSec = 60 / playTempo;
-        let beatsElapsed = playStartBeatOffset + elapsed / beatSec;
+/* 进度条：拖动中只移动播放头预览；松手后播放/暂停状态从该处重建播放，停止状态仅定位 */
+function bindSeek() {
+    els.seekBar.addEventListener("pointerdown", () => { seekDragging = true; });
+    /* change 在部分场景（点击但值未变）可能不触发，pointerup 延迟复位兜底，
+       rAF 保证 change 先于复位执行 */
+    els.seekBar.addEventListener("pointerup", () => {
+        requestAnimationFrame(() => { seekDragging = false; });
+    });
+    els.seekBar.addEventListener("pointercancel", () => { seekDragging = false; });
+    els.seekBar.addEventListener("input", () => {
         const total = getTotalBeats();
-        if (total > 0 && playLoop) {
-            beatsElapsed = beatsElapsed % total;
+        playheadPos = Math.min(total, total * (Number(els.seekBar.value) / 1000));
+        updateTransportUI();
+        drawOverlay();
+    });
+    els.seekBar.addEventListener("change", () => {
+        seekDragging = false;
+        const total = getTotalBeats();
+        const beat = Math.max(0, Math.min(total - 0.001, total * (Number(els.seekBar.value) / 1000)));
+        if (playState === "playing" || playState === "paused") {
+            pausedSong = null; /* 曲谱快照失效：暂停恢复会退回重建重播 */
+            playFromBeat(beat);
+        } else {
+            playheadPos = beat;
+            drawOverlay();
         }
-
-        const track = state.tracks[0];
-        if (!track) {
-            playheadRAF = requestAnimationFrame(tick);
-            return;
-        }
-
-        const db = Number(els.defaultBeats.value) || 1;
-        let cum = 0;
-        let step = 0;
-        for (let i = 0; i < track.cells.length; i++) {
-            const b = Number(track.cells[i].beats) > 0 ? track.cells[i].beats : db;
-            if (cum + b > beatsElapsed) { step = i; break; }
-            cum += b;
-            step = i;
-        }
-
-        if (step !== currentPlayStep) {
-            currentPlayStep = step;
-            updatePlayheadUI(step);
-        }
-        playheadRAF = requestAnimationFrame(tick);
-    };
-    tick();
+        updateTransportUI();
+    });
 }
 
-function pausePlayhead() {
-    if (playheadRAF) {
-        cancelAnimationFrame(playheadRAF);
-        playheadRAF = null;
+/* 播放头推进（由 pianoroll 的 overlay 动画帧每帧调用） */
+function tickPlayhead() {
+    if (playState !== "playing") return;
+    if (seekDragging) return; /* 拖动进度条期间冻结音频时钟推进，由 input 事件接管播放头 */
+    const elapsed = SparrowCore.now() - playStartAudioTime;
+    const beatSec = 60 / playTempo;
+    let beats = playStartBeat + elapsed / beatSec;
+    if (playLoop && playTotalBeats > 0) beats = beats % playTotalBeats;
+    playheadPos = beats;
+    followPlayhead();
+    updateTransportUI();
+}
+
+function followPlayhead() {
+    const wrap = els.rollWrap;
+    const x = rollBeatToX(playheadPos);
+    if (x > wrap.clientWidth - 40 || x < ROLL.KEY_W) {
+        ROLL.scrollX = Math.max(0, playheadPos * ROLL.pxPerBeat - (wrap.clientWidth - ROLL.KEY_W) / 2);
+        clampScroll();
+        drawRoll();
     }
-    /* 保留 currentPlayStep，不调用 updatePlayheadUI(-1) */
 }
 
-function stopPlayhead() {
-    if (playheadRAF) {
-        cancelAnimationFrame(playheadRAF);
-        playheadRAF = null;
-    }
-    currentPlayStep = -1;
-    updatePlayheadUI(-1);
-}
-
-function updatePlayheadUI(step) {
-    /* 清除旧的播放高亮与步数标记 */
-    document.querySelectorAll(".cell.playing").forEach((el) => el.classList.remove("playing"));
-    document.querySelectorAll(".step-num.active").forEach((el) => el.classList.remove("active"));
-
-    if (step < 0) return;
-
-    /* 多小节：播放头可能落在其他小节，仅更新导航文本，不重建 DOM */
-    const stepsPerBar = getStepCount();
-    const bar = Math.floor(step / stepsPerBar);
-    const localStep = step % stepsPerBar;
-
-    if (bar !== state.currentBar) {
-        state.currentBar = bar;
-        els.barTabs.querySelectorAll(".bar-tab").forEach((el, i) => {
-            el.classList.toggle("active", i === bar);
-        });
-        /* 重建网格跟随播放小节；正在网格输入时暂缓重建，避免打断编辑（代价是该小节内不显示行高亮） */
-        const focused = document.activeElement;
-        if (!(focused && els.editorBody.contains(focused))) {
-            renderTracks();
-        }
-    }
-
-    /* 高亮当前播放到的"行"：同一 localStep 的全部音轨方格 */
-    document.querySelectorAll(`.cell[data-step="${localStep}"]`).forEach((el) => el.classList.add("playing"));
-
-    /* 左侧步数列标记当前行 */
-    const stepNums = els.editorBody.querySelectorAll(".step-num");
-    if (stepNums[localStep]) stepNums[localStep].classList.add("active");
-}
-
-/* ===== 播放/暂停/停止 ===== */
-async function playFromStep(step) {
+async function playFromBeat(beat) {
     await SparrowMusicManager.unlock();
     SparrowMusicManager.stopBgm({ fadeOut: 0.05 });
+    /* 起播拍钳制在网格内：越界起播会让所有轨标记播完、引擎立即停止，
+       而编辑器仍处于播放态（界面在走、无声、暂停/恢复循环损坏） */
+    const clamped = Math.max(0, Math.min(Number(beat) || 0, getTotalBeats() - 0.001));
     const song = buildSong();
     SparrowMusicLibrary[song.id] = song;
-    SparrowMusicManager.playBgm(song.id, { startStep: step, crossFade: 0.05, fadeIn: song.fadeIn });
-    startPlayhead(step);
+    SparrowMusicManager.playBgm(song.id, { startBeat: clamped });
+    playTempo = song.tempo;
+    playLoop = song.loop;
+    playTotalBeats = song.beatsPerBar * song.bars;
+    playStartBeat = Math.max(0, Math.min(clamped, playTotalBeats - 0.001));
+    playStartAudioTime = SparrowCore.now();
+    playheadPos = playStartBeat;
     playState = "playing";
-    writeStatus(step > 0 ? `从第 ${state.currentBar + 1} 小节第 ${step % getStepCount() + 1} 步继续播放：${song.name}` : `正在播放：${song.name}`);
+    pausedSong = null;
+    updateTransportUI();
+    writeStatus(beat > 0
+        ? `从第 ${Math.floor(beat / song.beatsPerBar) + 1} 小节播放：${song.name}`
+        : `正在播放：${song.name}`);
 }
 
 async function playCurrentSong() {
     await SparrowMusicManager.unlock();
     if (playState === "paused") {
-        await playFromStep(currentPlayStep);
+        /* 暂停后数据未被编辑：走引擎真恢复（保留调度状态）；
+           被编辑过：快照失效，退回重建曲谱从暂停拍重播 */
+        const unchanged = pausedSong !== null
+            && JSON.stringify(buildSong()) === JSON.stringify(pausedSong);
+        if (unchanged) {
+            SparrowMusicManager.resumeBgm();
+            playStartAudioTime = SparrowCore.now();
+            playStartBeat = playheadPos;
+            playState = "playing";
+            updateTransportUI();
+            writeStatus(`继续播放：${els.songName.value.trim() || "未命名曲谱"}`);
+            return;
+        }
+        await playFromBeat(pausedBeat);
         return;
     }
     if (playState === "playing") return;
-    await playFromStep(0);
+    /* 停止状态：从播放头所在位置播放（进度条定位过则从定位处开始） */
+    await playFromBeat(playheadPos > 0 ? playheadPos : 0);
 }
 
 function pauseCurrentSong() {
     if (playState !== "playing") return;
-    SparrowMusicManager.stopBgm({ fadeOut: 0.1 });
-    pausePlayhead();
+    pausedSong = buildSong();
+    pausedBeat = playheadPos;
+    SparrowMusicManager.pauseBgm();
     playState = "paused";
-    writeStatus(`已暂停于第 ${state.currentBar + 1} 小节第 ${currentPlayStep % getStepCount() + 1} 步，点击播放继续。`);
+    updateTransportUI();
+    writeStatus(`已暂停于第 ${Math.floor(playheadPos / getBeatsPerBar()) + 1} 小节，点击播放继续。`);
 }
 
-async function restartFromBeginning() {
-    await playFromStep(0);
+function restartFromBeginning() {
+    return playFromBeat(0);
 }
 
-function jumpToStep(step) {
-    playFromStep(step);
-}
+/* 后台返回对齐：标签页隐藏期间 rAF 暂停使播放头冻结，但调度器仍被浏览器
+   节流（setInterval ≥1s）并因停顿重锚拉伸推进音频内容——返回时播放头跳到
+   墙钟位置，音频内容滞后且永不自愈。隐藏超过 3s 后重新可见时，在冻结的
+   播头位置重建播放，立即与显示对齐（跳过后台拉伸期，不重复已播内容）。 */
+let hiddenAt = 0;
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+    } else if (document.visibilityState === "visible"
+        && playState === "playing"
+        && hiddenAt > 0 && Date.now() - hiddenAt > 3000) {
+        const beat = Math.max(0, playheadPos); /* 同步捕获：rAF 恢复前读冻结的播放头 */
+        playFromBeat(beat);
+    }
+});
 
 function stopCurrentSong() {
     SparrowMusicManager.stopBgm({ fadeOut: 0.2 });
-    stopPlayhead();
+    playheadPos = -1;
+    pausedSong = null;
     playState = "stopped";
+    updateTransportUI();
     writeStatus("已停止播放。");
 }

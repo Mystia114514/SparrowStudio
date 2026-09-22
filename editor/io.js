@@ -1,9 +1,9 @@
 /**
  * Sparrow Editor - io（MIDI 文件读写）
- * 纯 MIDI 编辑器：打开 .mid（SparrowMidiParser 实时解析），
- * 保存为标准 MIDI 文件（format 1）。
- * 力度格直接使用 MIDI velocity（0-127 整数）：构建曲谱时换算为音符音量，
- * 与解析器导入映射互逆，打开 → 编辑 → 保存往返保真。
+ * 打开：SparrowMidiParser 实时解析 → applySong 回填（音符事件模型）。
+ * 保存：直接从音符事件序列化标准 MIDI format 1（起点/时值按 PPQ 换算，
+ * 无需 REST 拼装）；每条编辑轨写为一个 MTrk，轨内声部各占独立通道，同音不碰撞；
+ * 轨数/小节数经 sourceTrack 合并与曲长标记在往返中保留。
  */
 
 function downloadBlob(filename, data, mime) {
@@ -16,43 +16,18 @@ function downloadBlob(filename, data, mime) {
     URL.revokeObjectURL(url);
 }
 
-/* ===== 音符名 → MIDI 音号（与引擎 synth.noteToFrequency 一致：A4=69=440Hz）===== */
-function noteNameToMidi(name) {
-    if (!name || name === "REST" || name === "R") return null;
-    const m = String(name).match(/^([A-Ga-g])(#|b)?(-?\d)$/);
-    if (!m) return null;
-    const map = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
-    let semis = map[m[1].toUpperCase()];
-    if (m[2] === "#") semis += 1;
-    if (m[2] === "b") semis -= 1;
-    const oct = parseInt(m[3], 10);
-    return 12 * (oct + 1) + semis;
-}
-
-/* ===== 单音音量 → velocity（0-127）=====
-   与 midi-parser 的导入映射互逆（导入 vel/127*0.09 → 音量），
-   保证 .mid 打开 → 编辑 → 保存往返力度不丢失；空音量用默认力度 96。
-   音量 0（静音）导出为 velocity 1：MIDI 中 velocity 0 表示 Note Off，1 是最弱可表达值。 */
-function volumeToVelocity(volume) {
-    const n = Number(volume);
-    if (!Number.isFinite(n)) return 96;
-    if (n <= 0) return 1;
-    return Math.max(1, Math.min(127, Math.round(n / 0.09 * 127)));
-}
-
 /* ===== 保存为标准 MIDI 文件 (format 1) ===== */
 function buildMidi() {
     const PPQ = 480;
-    const song = buildSong();
-    const tempo = song.tempo || 96;
+    const tempo = Math.max(30, Math.min(240, Number(els.tempo.value) || 96));
     const microsPerQuarter = Math.max(1, Math.round(60000000 / tempo));
+    const utf8 = new TextEncoder();
 
-    /* 内置音色 → GM 音色号（与 midi-parser 的精确映射互逆，往返一致） */
-    const instToProgram = {
-        piano: 0, epiano: 4, musicbox: 10, organ: 16, guitar: 24, bass: 32,
-        violin: 40, harp: 46, strings: 48, choir: 52, trumpet: 56, tuba: 58,
-        brass: 61, sax: 64, flute: 72, chip8: 80, synthPad: 88
-    };
+    /* 文本元事件（Track/Sequence Name）：delta 0 + FF type + 变长长度 + UTF-8 数据 */
+    function textMeta(metaType, text) {
+        const data = utf8.encode(String(text || ""));
+        return [...varLen(0), 0xFF, metaType, ...varLen(data.length), ...data];
+    }
 
     function varLen(value) {
         const bytes = [];
@@ -72,52 +47,65 @@ function buildMidi() {
 
     const tracks = [];
 
-    // 轨道 0: 速度 + 拍号
+    // 轨道 0: 序列名 + 速度 + 拍号 + 曲长标记
     const t0 = [];
+    t0.push(...textMeta(0x03, els.songName.value.trim() || "SparrowStudio"));
     t0.push(...varLen(0), 0xFF, 0x51, 0x03,
         (microsPerQuarter >> 16) & 0xFF,
         (microsPerQuarter >> 8) & 0xFF,
         microsPerQuarter & 0xFF);
-    // 拍号元事件：4/4 拍，24 ticks per metronome click, 8 32nd notes per quarter
-    t0.push(...varLen(0), 0xFF, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08);
+    // 拍号元事件：每小节 beatsPerBar 拍，24 ticks per metronome click, 8 32nd notes per quarter
+    t0.push(...varLen(0), 0xFF, 0x58, 0x04, getBeatsPerBar() & 0x7F, 0x02, 0x18, 0x08);
+    // 曲长标记（Sequencer-Specific 元事件，MIDI 标准无小节数字段）：
+    // "SPW" 魔数 + 16 位小节数，导入时还原网格长度（外部文件无此标记则按音符推断）
+    const barCount = getBarCount();
+    t0.push(...varLen(0), 0xFF, 0x7F, 0x05, 0x53, 0x50, 0x57,
+        (barCount >> 8) & 0xFF, barCount & 0xFF);
     t0.push(...varLen(0), 0xFF, 0x2F, 0x00);
     tracks.push(t0);
 
-    /* 旋律通道池：跳过通道 10（索引 9，GM 打击乐），避免通道分配碰撞。
-       音轨多于 15 条时循环复用通道——format 1 允许跨轨共享通道，
-       各轨音色由轨内自己的 Program Change 决定。 */
+    /* 旋律通道池：跳过通道 10（索引 9，GM 打击乐）。每个声部占用一个通道，
+       同音碰撞只可能发生在同一声部内（单声部，无碰撞）；音轨多于通道池时循环复用。
+       注意：一条编辑轨的全部声部合写进同一个 MTrk（仅通道不同），
+       这样 MIDI 往返（导入按 sourceTrack 合并）不会把和弦声部拆成多条编辑轨。 */
     const MELODIC_CHANNELS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15];
+    const instToProgram = {
+        piano: 0, epiano: 4, musicbox: 10, organ: 16, guitar: 24, bass: 32,
+        violin: 40, harp: 46, strings: 48, choir: 52, trumpet: 56, tuba: 58,
+        brass: 61, sax: 64, flute: 72, chip8: 80, synthPad: 88
+    };
+    let chCursor = 0;
 
-    // 每条音轨一条 MIDI 轨道
-    song.tracks.forEach((track, i) => {
-        const ev = [];
-        const ch = MELODIC_CHANNELS[i % MELODIC_CHANNELS.length];
+    state.tracks.forEach((track) => {
         const prog = instToProgram[track.instrument] ?? 0;
-        ev.push(...varLen(0), 0xC0 | ch, prog & 0x7F);
-        ev.push(...varLen(0), 0xB0 | ch, 0x07, 100); // CC7 音量
+        const gate = Number.isFinite(Number(track.gate)) ? Math.min(1, Math.max(0.1, track.gate)) : 0.85;
+        const ev = [];
+        ev.push(...textMeta(0x03, track.name));
 
-        let last = 0;
-        let t = 0;
-        const gate = track.gate ?? 0.85;
-        track.pattern.forEach((item) => {
-            const note = item[0];
-            const beats = Number(item[1]) || 1;
-            const duration = Math.max(1, Math.round(beats * PPQ));
-            if (note !== "REST" && note !== "R") {
-                const midi = noteNameToMidi(note);
-                if (midi !== null && midi >= 0 && midi <= 127) {
-                    let noteLen = Math.round(duration * gate);
-                    if (noteLen < 1) noteLen = 1;
-                    const vel = volumeToVelocity(item[2]?.volume);
-                    ev.push(...varLen(t - last), 0x90 | ch, midi & 0x7F, vel);
-                    last = t;
-                    ev.push(...varLen(noteLen), 0x80 | ch, midi & 0x7F, 0);
-                    last = t + noteLen;
-                }
-            }
-            t += duration;
+        /* 收集全部声部事件后按 tick 排序再折算 delta（MTrk 内 delta 必须单调递增）；
+           同 tick 时 note off 先于 note on（order 0 < 1），保证 gate=1 的顺接音符时值正确 */
+        const events = [];
+        splitVoices(track.notes).forEach((vnotes) => {
+            const ch = MELODIC_CHANNELS[chCursor++ % MELODIC_CHANNELS.length];
+            events.push({ tick: 0, order: 0, data: [0xC0 | ch, prog & 0x7F] });
+            events.push({ tick: 0, order: 0, data: [0xB0 | ch, 0x07, 100] }); // CC7 音量
+            [...vnotes].sort((a, b) => a.start - b.start).forEach((n) => {
+                const on = Math.round(n.start * PPQ);
+                const off = Math.max(on + 1, Math.round((n.start + n.dur * gate) * PPQ));
+                /* 力度 0（静音）导出为 1：MIDI 中 velocity 0 表示 Note Off */
+                const vel = n.vel > 0 ? Math.max(1, Math.min(127, Math.round(n.vel))) : 1;
+                events.push({ tick: on, order: 1, data: [0x90 | ch, n.pitch & 0x7F, vel] });
+                events.push({ tick: off, order: 0, data: [0x80 | ch, n.pitch & 0x7F, 0] });
+            });
         });
-        ev.push(...varLen(Math.max(0, t - last)), 0xFF, 0x2F, 0x00);
+        events.sort((a, b) => a.tick - b.tick || a.order - b.order);
+        let last = 0;
+        events.forEach((e) => {
+            ev.push(...varLen(Math.max(0, e.tick - last)), ...e.data);
+            last = e.tick;
+        });
+
+        ev.push(...varLen(0), 0xFF, 0x2F, 0x00);
         tracks.push(ev);
     });
 
@@ -132,10 +120,10 @@ function buildMidi() {
         out.push(...u32(tr.length));
         out.push(...tr);
     });
-    return new Uint8Array(out);
+    return { bytes: new Uint8Array(out) };
 }
 
-/* ===== 打开 MIDI：实时解析 .mid 为曲谱对象再应用 ===== */
+/* ===== 打开 MIDI：实时解析 .mid 为音符事件再应用 ===== */
 async function importMidiFile(file) {
     const song = SparrowMidiParser.parse(
         new Uint8Array(await file.arrayBuffer()),
@@ -143,7 +131,4 @@ async function importMidiFile(file) {
     );
     if (!song) throw new Error("无法解析 MIDI 文件。");
     applySong(song);
-    const overflow = song.tracks.length - 32;
-    const cutNote = overflow > 0 ? `，超出 32 轨的 ${overflow} 轨未在网格中显示` : "";
-    writeStatus(`已打开 MIDI：${els.songName.value}（${song.tracks.length} 条音轨，${song.tempo} BPM${cutNote}）`);
 }

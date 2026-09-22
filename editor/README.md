@@ -2,65 +2,76 @@
 
 可视化 **MIDI 编辑器**（Sparrow MIDI Editor，即 SparrowStudio 工作室的编辑器组件与首页），仅用于制作/试听/编辑标准 .mid 文件，**不进游戏**。
 
+编辑器采用**钢琴卷帘（piano roll）范式**：行 = 音高、列 = 时间轴（拍），鼠标在画布上直接画音符/移动/改时值，支持撤销重做与复制粘贴。
+
 ## 启动方式
 
-直接双击 `music-editor.html` 即可（经典 script 标签，支持 `file://` 打开；浏览器自动播放策略要求声音须由点击触发，点击"播放"即为有效手势）。
+直接双击 `music-editor.html` 即可（经典 script 标签，支持 `file://` 打开；浏览器自动播放策略要求声音须由点击触发，点击"播放"或琴键即为有效手势）。
 
 ## 文件功能详解
 
 ### music-editor.html — 入口页
 
-完整 HTML 结构：左侧参数面板（曲谱 ID/曲名/BPM/小节步数/小节数量/音轨数量/默认节拍/音量/淡入/循环）、按钮条（播放/暂停/从头开始/停止/清空/打开 MIDI/保存 MIDI）、右侧编辑区（小节导航 + 竖向网格 + 操作提示）、自定义确认弹窗。文件底部按依赖顺序加载 core/ 引擎、instruments/ 音色与音效数据、本文件夹模块。
+完整 HTML 结构：**左侧固定控制面板**（标题/状态栏、**播放器式走带**（⏮ 从头开始 / ▶⏸ 播放暂停单键切换 / ⏹ 停止 + 可拖动进度条 + 时间显示 m:ss/m:ss）、文件与音轨按钮（清空/打开 MIDI/保存 MIDI/复制音轨/删除音轨）、参数区——曲谱 ID/曲名/BPM/小节数量/每小节拍数/吸附/音轨数量，仅保留 MIDI 能表达或编辑必需的参数；窄屏回退为顶部横排）、右侧编辑区（音轨标签条 + 音轨/音符属性行 + 钢琴卷帘画布 + 操作提示）、自定义确认弹窗。文件底部按依赖顺序加载 core/ 引擎、instruments/ 音色与音效数据、本文件夹模块。
 
 ### style.css — 暗色主题样式
 
-设计令牌（CSS 变量：配色/边框）、左面板与按钮/输入框样式、编辑区网格（竖向格子、步数列、小节导航卡、播放高亮 `.playing`）、悬浮提示 `.tip`、确认弹窗 `.modal`。
+设计令牌（CSS 变量：配色/边框）、左面板与按钮/输入框样式、音轨标签条（`.track-tab`）、卷帘画布容器（`.roll-wrap`，双层 canvas 绝对定位叠放）、音符属性条、悬浮提示 `.tip`、确认弹窗 `.modal`。
 
 ### shared.js — 共享基础（须最先加载）
 
 - `instruments`：编辑器可选音色清单（17 种，与引擎内置音色一一对应）。
-- `els`：DOM 引用表（状态栏、网格容器、全部参数输入框、工具栏）。
+- `INSTRUMENT_LABELS` / `instrumentLabel(id)`：音色中文名标注（如 `piano · 钢琴`）。
+- `PITCH_NAMES` / `pitchToName(pitch)` / `nameToPitch(name)`：MIDI 音号 ↔ 音名互转（与引擎 `SparrowNoteParser` 同一套记法）。
+- `qBeats(b)`：拍数浮点整理（吸附运算尾差收敛到 1e-4 拍）。
+- `els`：DOM 引用表（状态栏、卷帘双 canvas、音轨标签/属性、音符属性条、全部参数输入框）。
 - `writeStatus(message)`：状态栏输出。
-- `clampInput(el, min, max)`：数值输入延迟钳制——输入中只拦超上限（继续输入不可能补全），失焦/回车才回弹完整范围，避免打断输入。
+- `clampInput(el, min, max)`：数值输入延迟钳制——输入中只拦超上限，失焦/回车才回弹完整范围。
 
 ### ui.js — 通用 UI 组件
 
-- `bindTooltips(root)`：给带 `data-tip` 的输入控件绑定悬浮提示（悬停 2 秒显示参数说明）。
-- `customConfirm(title, body)`：自定义确认弹窗（Promise 化；Esc/点遮罩取消），替代原生 confirm。
+- `bindTooltips(root)`：给带 `data-tip` 的输入控件绑定悬浮提示（悬停 2 秒显示）。
+- `bindWheelAdjust(el, {step, min, max, integer, fallback})`：数值输入框滚轮步进（Shift+滚轮 = 8 倍步长），触发 input + change 复用既有钳制；用于 gate。
+- `bindWheelSelect(el, values)`：选项列表滚轮循环切换；用于音色下拉。
+- `customConfirm(title, body)`：自定义确认弹窗（Promise 化；Esc/点遮罩取消）。**并发守卫**：同一时刻仅允许一个弹窗，未处理完又触发的新确认直接按"取消"解决（避免两个 Promise 同时挂起、一次点击重复执行多段处理逻辑）。
 
-### state.js — 数据模型与参数约束
+### state.js — 数据模型、选择与撤销历史
 
-- `state`：`{ tracks, currentBar, layout }`——音轨数组、当前显示小节、网格布局记录。
-- 音轨结构 `{ name, instrument, gate, cells[] }`；单元格 `{ note, beats, volume }`（volume 承担 MIDI velocity 角色）。
-- 参数读取与钳制：`getStepCount`（4–64）、`getBarCount`（1–16）、`getTrackCount`（1–32）、`getDefaultLength` 等。
-- `syncTrackCount()`：音轨数量与输入同步（增轨/减轨）。
-- `normalizeCells()`：布局变化时按 `state.layout` 记录的旧布局把平铺 cells 按 `[bar][step]` 二维重组（两个参数同时修改也不错位）。
+- 音轨结构 `{ name, instrument, gate, notes[] }`；音符 `{ id, pitch, start, dur, vel }`：pitch 为 MIDI 音号（0-127），start/dur 为拍数（自曲首累计，浮点），vel 为 MIDI velocity（0-127，96 默认，0 静音）。
+- **一条音轨允许多音符叠放（和弦）**；播放/导出时自动按重叠关系拆声部。
+- 参数读取与钳制：每小节拍数（1–12）、小节数量（1–512）、音轨数量（1–32）；曲长 = 每小节拍数 × 小节数。`snapshotSongLength` 维护曲长参数回弹基准（供 main.js 取消缩短时恢复）。
+- 吸附：`snapFloorB` / `snapRoundB`（吸附粒度 `state.snap`：1 / 1/2 / 1/4 / 1/8 拍）。
+- 选择：`state.selection`（`[{track, id}]`，按音符 id 引用，增删改后自动失效清理）。
+- 撤销/重做：命令栈（上限 100 条），条目为音符差量 `[{track, id, before, after}]`（完整克隆，null 表示新增/删除）；`commitNotes(label, deltas)` 记录，调用方自行落地数据，**无实际变化的差量（拖动抖动吸附回原位、改属性未改值）自动过滤不入栈**；`undoNotes` / `redoNotes` 触发、重绘并**恢复受影响音符的选中**；复制音轨、删除音轨、减少音轨数量等结构性变更（轨索引位移）会清空撤销历史。
 
-### grid.js — 网格与小节导航渲染
+### pianoroll.js — 钢琴卷帘画布（渲染 + 全部交互）
 
-- `renderAll()` / `renderTracks()`：重建竖向网格（列 = 音轨，行 = 步骤，仅渲染当前小节）；列头内嵌音轨名/音色/gate 输入。
-- `updateBarNav()`：小节卡片导航渲染与高亮。
-- 步数点击：从该步播放——**读取点击时刻的 currentBar** 计算绝对步，避免跨小节后闭包过期。
+- **双层 canvas**：`roll-main`（音高行底色、拍/小节线、音符、琴键列、小节标尺，状态变化重绘）+ `roll-overlay`（播放头、框选矩形，动画帧重绘）；devicePixelRatio 适配，视口裁剪。
+- 行 = 音高（C0..B7 可滚动），列 = 拍；当前轨彩色音符（透明度随力度深浅，选中金色描边），其他轨灰色幽灵音符。
+- 交互：左键空白拖动 = 画音符（松开试听；曲外暗区不绘制——越界音符播放时静默不可闻）；拖音符 = 移动（横向吸附 snap、纵向半音，音高变化即试听）；拖音符右缘 = 改时值；**右键/中键拖动 = 平移画面（水平+垂直）**，右键原地点击音符 = 删除（以 4px 拖动阈值区分）；Shift+拖空白 = 框选；Shift+点击 = 加选/减选；滚轮 = 滚动，Ctrl+滚轮 = 以指针为锚缩放；点击琴键 = 试听；点击小节标尺 = 从该拍播放（起播拍钳制在网格内，越界起播会让引擎立即停播而界面仍在走）；粘贴过滤曲末外音符；属性条起点钳制在网格内。
+- 音轨标签条：切换当前编辑轨（幽灵音符提供上下文）。复制/删除当前音轨的按钮在左侧控制面板按钮区："复制音轨"在当前轨后插入完整副本；"删除音轨"删除当前轨（二次确认，至少保留一条，结构性变更会清空撤销历史）。
+- 音轨属性行：左侧为当前轨的名称/音色（含滚轮切换）/gate；右侧为选中音符的音名/起点/时长/力度精确键入（多选时仅力度可批量改）。
+- `renderAll()`：标签 + 属性 + 滚动钳制 + 重绘（applySong/撤销重做/参数变更后调用）。
 
 ### song.js — 曲谱对象双向转换
 
-- `buildSong(startBeat)`：编辑器状态 → 引擎曲谱对象（空格按 defaultBeats 转 REST、力度格转逐音符 volume、全部 pattern 等长保证循环同步）。
-- `applySong(song)`：曲谱对象 → 编辑器状态（推断/读取布局、音符超出网格截断、最多 32 轨、写 `state.layout`）。
+- `buildSong()`：音符事件 → 引擎曲谱对象。每条编辑轨按重叠关系**拆声部**（`splitVoices`：贪心复用已结束的声部），每个声部序列化为 `[音名, 拍数, {volume}]` + REST 的顺序 pattern，尾部补 REST 对齐曲长（循环不失步）；各声部携带 `editorTrack` 标记；曲谱对象含 `beatsPerBar` / `bars` 字段。
+- `applySong(song)`：曲谱对象 → 音符事件。按 `editorTrack` 把声部**并回同一编辑轨**（构建过的曲谱往返不增轨）；MIDI 解析的曲谱按 `sourceTrack`（来源 MIDI 轨）+ 音色合并，同一 MIDI 轨拆出的和弦声部并回同一条编辑轨；曲长按真实拍数推断；velocity ↔ 音量映射与 midi-parser 互逆，往返不失真；超出 512 小节容量的音符、超出 32 条的编辑轨均在状态栏提示丢弃数量。
 
-### playback.js — 播放控制与播放头
+### playback.js — 播放控制、走带 UI 与播放头
 
-- `playCurrentSong` / `playFromStep` / `pauseCurrentSong` / `restartFromBeginning` / `stopCurrentSong`：播放 = `buildSong()` 即时构建曲谱注册进曲谱库后走引擎调度器，听到即真实效果。
-- 播放头：`requestAnimationFrame` + 音频时钟按 BPM 推进，高亮当前行；跨小节时重建网格跟随播放（焦点在网格输入框内则暂缓，避免打断编辑）。
+- **走带（音乐播放器样式）**：⏮ 从头开始；▶/⏸ 单键切换播放暂停；⏹ 停止并归零；进度条拖动定位——拖动中只移动播放头预览，播放/暂停状态松手后从该拍重建播放，停止状态仅定位播放头（下次播放从该处开始）；时间显示 `m:ss / m:ss`（播放/暂停中按音频实际使用的 BPM 换算——改输入框 BPM 不影响正在播放的曲子，显示与听到的内容一致；停止状态按输入框 BPM 预览曲长），由 overlay 动画帧每帧刷新；**后台返回对齐**——标签页隐藏超过 3 秒后重新可见时，在冻结的播放头位置重建播放，消除后台调度节流导致的音频内容滞后（跳过拉伸期，不重复已播内容）。
+- `playFromBeat(beat)`：`buildSong()` 即时构建曲谱注册进曲谱库，经引擎 `startBeat` 选项从任意拍起播（各轨光标按拍定位，保持对齐）；播放头由 AudioContext 时钟按拍推进，跟随滚动。
+- 空格 = 播放/暂停；暂停走引擎真暂停（`pauseBgm`/`resumeBgm` 保留调度状态），恢复时若曲谱被编辑过（快照比对）则退回从暂停拍重建重播。
 
 ### io.js — MIDI 文件读写
 
-- `buildMidi()`：手写字节序列化——标准 MIDI format 1（PPQ 480，SetTempo + 4/4 拍号），旋律通道池分配（跳过通道 10），gate 按比例缩短音符，力度格 ↔ velocity 互逆转换。
-- `importMidiFile(file)`：FileReader → `SparrowMidiParser` 实时解析 → `applySong` 回填；超出 32 轨在状态栏提示截断数量。
-- `noteNameToMidi` / `volumeToVelocity`：与解析映射互逆的转换器，保证打开 → 编辑 → 保存往返不失真。
+- **打开 MIDI**：任意来源 `.mid`/`.midi`（本编辑器保存的、DAW 导出的均可），`SparrowMidiParser` 实时解析 → `applySong` 回填。GM 音色按家族区间映射到 17 种内置音色，延音踏板（CC64）生效，Track Name 读回为轨名；解析器给每条曲谱轨携带 `sourceTrack`（来源 MIDI 轨）标记，**本编辑器保存的含和弦文件再导入不会增轨**（同一 MIDI 轨的同音色声部并回一条编辑轨）。
+- **保存 MIDI**：直接从音符事件序列化标准 MIDI format 1（PPQ 480，起点/时值 × PPQ 取整，**无需 REST 拼装**）；**每条编辑轨写为一个 MTrk**，轨内和弦先拆声部、每个声部独立通道（旋律通道池跳过打击乐通道 10，循环复用），同音碰撞不会发生，事件按 tick 全局排序（同 tick note off 先于 note on）；力度 0（静音）导出为 velocity 1（MIDI 中 0 表示 Note Off）；写入 Track Name 元事件往返保留轨名；写入 Sequencer-Specific 曲长标记（0x7F，"SPW" + 小节数）往返保留网格长度（MIDI 标准无小节数字段）。
 
 ### main.js — 事件绑定与初始化（须最后加载）
 
-按钮事件绑定、数值输入钳制应用、小节步数/小节数量/音轨数量变更处理（缩小时二次确认）、清空确认、保存/打开 MIDI 入口、初始化（默认 3 轨 × 16 步）。
+按钮事件绑定、参数钳制与联动（**缩短曲长**与**减少音轨数量**时若删除范围含音符均需二次确认，取消则输入框回弹到生效值；曲长/音轨数的程序化改写——导入、清空——会同步回弹基准 `snapshotSongLength`，避免取消时回弹到陈旧值）、快捷键、复制/粘贴、初始化（默认 3 轨 × 16 小节 4/4 拍）。
 
 ## 加载顺序（music-editor.html 中）
 
@@ -68,47 +79,43 @@
 ../core/audio-core.js → ../core/note-parser.js → ../instruments/instruments.js
 → ../core/synth.js → ../core/sequencer.js → ../core/sfx-player.js
 → ../core/midi-parser.js → ../core/audio-manager.js
-→ shared.js → ui.js → state.js → grid.js → song.js → playback.js → io.js → main.js
+→ shared.js → ui.js → state.js → pianoroll.js → song.js → playback.js → io.js → main.js
 ```
 
 编辑器模块之间通过**经典脚本的共享全局词法作用域**协作（顶层 `const`/`let`/`function` 跨文件可见），因此顺序即依赖；引擎部分见 `core/README.md`。
-
-## 数据模型
-
-- 每条音轨 `{ name, instrument, gate, cells[] }`。
-- `cells` 为 **1D 平铺数组**，长度 = 小节步数 × 小节数量，按小节顺序排列；渲染/播放时按 `[bar][step]` 展开寻址。
-- 每格 `{ note, beats, volume }`：note 留空或 `REST` 为休止；volume 即 MIDI velocity（0-127 整数，96 为默认，0 为静音），留空用默认力度 96；构建曲谱时换算为音符音量 0-0.09（与解析导入映射互逆）。
 
 ## 参数约束（双重钳制：HTML min/max 属性 + 读取时钳制）
 
 | 参数 | 范围 |
 |---|---|
 | BPM | 30 – 240 |
-| 小节步数 | 4 – 64 |
-| 小节数量 | 1 – 100 |
+| 小节数量 | 1 – 512 |
+| 每小节拍数 | 1 – 12 |
 | 音轨数量 | 1 – 32 |
-| 默认节拍 | 0.25 – 8 |
-| 音量 | 0 – 2000 |
-| 淡入秒数 | 0 – 5（仅编辑器内播放有效，MIDI 文件不支持） |
+| 吸附 | 1 / 1/2 / 1/4 / 1/8 拍 |
 
-数值输入采用**延迟钳制**：输入过程中只拦截超上限（继续输入不可能补全），低于下限的中间值（如输入 50 时的 "5"）放行，失焦/回车才强制回弹，避免打断输入。
+> 音量/淡入/循环不会写入 .mid（MIDI 格式不支持），已从面板移除：编辑器内播放用引擎默认值（音量 2.5、淡入 0.35s、循环开），游戏侧按需经 `SparrowMusicManager.loadMidi` 的 `{ volume, loop }` 选项控制。
 
-## 关键行为约定（改代码前必读）
+## 快捷键
 
-- **播放跨小节时网格重建跟随播放小节**；若焦点正在网格输入框内则暂缓重建（避免打断编辑，代价是该小节内不显示行高亮）。
-- **修改小节步数**时 `normalizeCells` 依据 `state.layout` 记录的旧布局按 `[bar][step]` 二维展开重组平铺数组（小节步数与小节数量同时修改也不会错位）。
-- **减少小节数量**会截断数据，弹出二次确认（`customConfirm`）后才执行。
-- 播放时 `buildSong()` 即时构建曲谱并挂到 `SparrowMusicLibrary[song.id]`，再经 `SparrowMusicManager.playBgm` 播放——编辑器内听到即引擎真实效果。
+| 键 | 功能 |
+|---|---|
+| 空格 | 播放 / 暂停 |
+| Delete / Backspace | 删除选中音符 |
+| Ctrl+Z / Ctrl+Shift+Z（Ctrl+Y） | 撤销 / 重做 |
+| Ctrl+C / Ctrl+V | 复制 / 粘贴选中音符（粘贴到最近点击的拍位） |
+| Ctrl+A | 全选当前轨音符 |
+| Esc | 取消选择 |
 
 ## 文件读写（纯 MIDI）
 
-- **打开 MIDI**：任意来源 `.mid`/`.midi` 文件（本编辑器保存的、DAW 导出的均可），`SparrowMidiParser` 实时解析为可编辑网格。GM 音色按家族区间映射到 17 种内置音色，延音踏板（CC64）生效，和弦自动拆分声部轨；编辑器网格显示上限 32 轨 × 100 小节，超出部分在状态栏提示截断数量。
-- **保存 MIDI**：标准 MIDI format 1（PPQ 480，4/4 拍），音色映射到 GM program，gate 按比例缩短音符时值；单音"力度"格转换为 velocity（0-127），与打开时的解析映射互逆，**打开 → 编辑 → 保存往返力度不丢失**。MIDI 通道使用旋律通道池（跳过通道 10 打击乐），音轨多于 15 条时循环复用通道。
-- 编辑器仅支持 .mid 一种格式（JS/JSON 曲谱已废弃）；引擎侧 `loadMidi` API 不受影响（见 `core/README.md`）。
+- 编辑器仅支持 .mid 一种格式；引擎侧 `loadMidi` API 不受影响（见 `core/README.md`）。
+- 打开 → 编辑 → 保存往返：轨数/小节数/拍号/音高/力度/轨名无损；起点与时值经 tick 取整（精度 1/480 拍）与 gate 缩短（音符实际发声 = 时值 × gate），属 MIDI 格式固有语义。
 
 ## 设计边界（当前范式约束，知悉即可）
 
-- **"小节"是格子分块而非音乐小节**：每格节拍数可变，一个小节的实际拍数 = 该块各格 beats 之和；BPM 播放按拍计时、网格按格分块，两者只在所有格 beats=1 时对齐 4/4。
-- **每轨单声部**：一格只容纳一个音名，和弦需拆多条音轨（打开含和弦的 MIDI 时解析器已自动拆声部）。
-- **播放头时长按音轨 0 累计**：各轨同格子的 beats 可以不同，播放头以音轨 0 为时间基准（所有轨格子数由 `normalizeCells` 强制等长）。
-- **循环对齐由 buildSong 保证**：各音轨节拍总和可能不同（各格 beats 独立可调），`buildSong()` 构建曲谱时给较短的音轨尾部补 REST 对齐到最长音轨，保证调度器循环各轨不失步（MIDI 导入由解析器做同样对齐）。
+- **时间轴为真实音乐时间**：一格 = 拍（由缩放决定像素），小节线按"每小节拍数"划分；导入的 MIDI 音符按解析出的真实拍位落行，不再存在"事件挤在首位"的显示错位。
+- **引擎播放以编辑器曲谱为唯一时间真值**：`buildSong()` 各声部 pattern 尾部补 REST 对齐曲长，循环各声部同步；从任意拍起播由引擎 `startBeat` 保证多轨对齐。
+- **和弦播放自动拆声部**：编辑轨数量 ≠ 引擎实际发声声部数，保存 .mid / 播放均按声部拆分；同轨重叠同音各占一声部。
+- **512 小节容量上限**：导入超出容量的音符被丢弃并提示；缩短曲长时超出曲尾的音符经确认后删除（可撤销）。
+- **gate 为音轨级参数**：影响播放发声时长与 MIDI 导出音尾，不改变卷帘中音符的可视长度。
