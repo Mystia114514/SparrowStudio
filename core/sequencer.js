@@ -269,10 +269,16 @@
             /* null/undefined 步进按休止符处理：pattern 混入坏数据
                不允许在 tick（每 35ms）里抛 TypeError 停摆后续轨 */
             if (step === null || step === undefined) {
-                return { note: null, beats: track.defaultBeats || 1, rest: true };
+                /* 与字符串/对象路径同一套校验：负 defaultBeats 会使 trackTimes
+                   倒退、循环曲调度 while 永不退出（标签页假死） */
+                const beats = Number(track.defaultBeats);
+                return { note: null, beats: Number.isFinite(beats) && beats > 0 ? beats : 1, rest: true };
             }
             if (typeof step === "string" || typeof step === "number") {
-                return { note: step, beats: track.defaultBeats || 1, rest: step === "REST" || step === "R" };
+                /* 与对象路径同一套校验：负数 defaultBeats 会使 trackTimes 倒退、
+                    循环曲的调度 while 永不退出（标签页假死），必须回退 1 */
+                const beats = Number(track.defaultBeats);
+                return { note: step, beats: Number.isFinite(beats) && beats > 0 ? beats : 1, rest: step === "REST" || step === "R" };
             }
 
             const note = step[0];
@@ -322,7 +328,7 @@
             const startTime = Math.max(core.now(), Number(options.startTime) || 0);
             const rawDuration = Number(options.duration);
             const duration = Math.max(0.01, Number.isFinite(rawDuration) ? rawDuration : 0.25);
-            const release = Math.max(0.01, Number(instrument.release) || 0.08);
+            const release = Math.max(0.01, Number.isFinite(Number(instrument.release)) ? Number(instrument.release) : 0.08);
             const stopTime = startTime + duration + release + 0.03;
             synth.createToneNodes({
                 freq,
@@ -336,10 +342,13 @@
         },
 
         /* 拍→秒换算统一入口：track.tempo 优先于 song.tempo。
-           startBeat 定位、pause 光标回退与 scheduleTrack 必须同基准，否则带
-           轨 tempo 的曲子会各处节拍长度不一致导致错位 */
+            startBeat 定位、pause 光标回退与 scheduleTrack 必须同基准，否则带
+            轨 tempo 的曲子会各处节拍长度不一致导致错位。
+            tempo 非法（负数/非数值）回退 120：负节拍长会让 scheduleTrack 的
+            while 倒退死循环（曲谱对象来自外部接入方，不能假设已校验） */
         beatSeconds(track, song) {
-            return 60 / ((track && track.tempo) || song.tempo || 120);
+            const tempo = Number((track && track.tempo) || song.tempo || 120);
+            return 60 / (Number.isFinite(tempo) && tempo > 0 ? tempo : 120);
         }
     };
 

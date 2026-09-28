@@ -8,6 +8,13 @@
 (function(global) {
     "use strict";
 
+    /* 数值缺省判断：只有未提供/非数值才用缺省值，0（与负数）是合法输入
+       不能被 || 当缺省吞掉（与 volume 0 静音同一规则，2026-09-09 修复的延续） */
+    function numOr(value, fallback) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : fallback;
+    }
+
     const Synth = {
         /* 不在加载期快照默认音色表：instruments.js 若晚于本文件加载，
            resolveInstrument 会延迟到 global.SparrowDefaultInstruments 上查找，
@@ -39,7 +46,7 @@
             /* duration 允许 0（最短音）：只有未提供/非数值时才用缺省，不能把 0 当缺省 */
             const rawDuration = Number(options?.duration);
             const duration = Math.max(0.01, Number.isFinite(rawDuration) ? rawDuration : 0.25);
-            const release = Math.max(0.01, Number(instrument.release) || 0.08);
+            const release = Math.max(0.01, numOr(instrument.release, 0.08));
             const stopTime = startTime + duration + release + 0.03;
 
             return this.createToneNodes({
@@ -60,7 +67,7 @@
             const startTime = Math.max(core.now(), Number(options.startTime) || 0);
             const duration = options.duration;
             const instrument = options.instrument;
-            const stopTime = options.stopTime || startTime + duration + Math.max(0.01, Number(instrument.release) || 0.08) + 0.03;
+            const stopTime = options.stopTime || startTime + duration + Math.max(0.01, numOr(instrument.release, 0.08)) + 0.03;
             const amp = core.ctx.createGain();
             const filter = core.ctx.createBiquadFilter();
             const oscillators = [];
@@ -166,8 +173,11 @@
             const osc = core.ctx.createOscillator();
             const amp = core.ctx.createGain();
             osc.type = "sine";
-            osc.frequency.setValueAtTime(Number(options?.from) || 130, startTime);
-            osc.frequency.exponentialRampToValueAtTime(Number(options?.to) || 45, startTime + duration);
+            osc.frequency.setValueAtTime(Math.max(0.01, numOr(options?.from, 130)), startTime);
+            /* exponentialRampToValueAtTime 目标必须为正（0/负值浏览器抛 RangeError，
+               异常会沿 playSfx 直接抛给游戏代码）：非法回退缺省 45 */
+            const kickTo = numOr(options?.to, 45);
+            osc.frequency.exponentialRampToValueAtTime(kickTo > 0 ? kickTo : 45, startTime + duration);
             amp.gain.setValueAtTime(Number.isFinite(Number(options?.volume))
                 ? Math.max(0.0001, Number(options.volume))
                 : 0.12, startTime);
@@ -193,10 +203,13 @@
         },
 
         applyEnvelope(param, startTime, duration, instrument) {
-            const attack = Math.max(0.001, Number(instrument.attack) || 0.01);
-            const decay = Math.max(0.001, Number(instrument.decay) || 0.08);
-            const sustain = Math.max(0.001, Math.min(1, Number(instrument.sustain) || 0.4));
-            const release = Math.max(0.001, Number(instrument.release) || 0.08);
+            /* 包络四段参数同一规则：0/负数合法（0 落到下限 0.001），
+               只有未提供/非数值才用缺省。此前 sustain 0 被 || 吞成 0.4，
+               打击乐/拨弦类"一次成音"音色（sustain 0）静默变成持续音 */
+            const attack = Math.max(0.001, numOr(instrument.attack, 0.01));
+            const decay = Math.max(0.001, numOr(instrument.decay, 0.08));
+            const sustain = Math.max(0.001, Math.min(1, numOr(instrument.sustain, 0.4)));
+            const release = Math.max(0.001, numOr(instrument.release, 0.08));
             /* volume 允许 0（静音）：0 由下限 0.0001 兜底（保持指数曲线合法），不能当缺省值 */
             const volume = Number.isFinite(Number(instrument.volume))
                 ? Math.max(0.0001, Number(instrument.volume))

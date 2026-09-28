@@ -8,8 +8,11 @@
 
 | 文件 | 内容 |
 |---|---|
-| `demo.mid` | 示例曲一：120 BPM，4 小节，钢琴旋律 + chip8 低音 |
-| `pixel-parade.mid` | 示例曲二《像素巡游》：100 BPM，8 小节，钢琴主旋律 + 小提琴铺底 + 大号低音 + chip8 琶音（Am-F-C-G 进行） |
+| `The_Passionate_and_Lively_Maiden.mid` | 示例曲：东方 Project 同人仿写曲，仿写自《おてんば恋娘》（Beloved Tomboyish Girl，《东方红魔乡》2 面 Boss 曲） |
+
+**来源与授权**：原曲《おてんば恋娘》版权归 ZUN / 上海爱丽丝幻乐团（Team Shanghai Alice）所有；本曲为作者仿写并制作谱面的二次创作作品，分发与使用请遵循《东方 Project》官方二次创作规约（https://touhou-project.news/ ）。
+
+**本曲谱为公开资源，可以随意取用**——复制、修改、再分发均可，无需署名；万一听了想笑，不报仓库作者的名字就可以了。
 
 ## 使用流程
 
@@ -37,4 +40,4 @@ SparrowMusicManager.playBgm("boss");
 ## 注意
 
 - `fetch` .mid 需 HTTP 环境（file:// 下被浏览器拦截）；本地 file:// 场景用编辑器的"打开 MIDI"按钮加载（FileReader 不受限）。
-- 文件夹当前含两首示例：`demo.mid`（120 BPM，4 小节，钢琴 + chip8）与 `pixel-parade.mid`（100 BPM，8 小节《像素巡游》：钢琴主旋律 + 小提琴铺底 + 大号低音 + chip8 琶音，Am-F-C-G 进行），可按上述流程直接加载试听；新曲用编辑器制作后放入此处即可。
+- 文件夹当前含一首示例曲 `The_Passionate_and_Lively_Maiden.mid`（东方同人仿写曲，来源与授权见上文"文件清单"），可按上述流程直接加载试听；新曲用编辑器制作后放入此处即可。

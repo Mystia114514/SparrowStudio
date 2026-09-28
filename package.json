@@ -1,0 +1,25 @@
+{
+  "name": "sparrow-studio",
+  "version": "1.0.0",
+  "description": "Pure-code Web Audio music studio: zero-dependency synthesis engine, piano-roll MIDI editor and sample scores. Synthesizes music live in the browser from a few-KB .mid score instead of shipping multi-MB audio files.",
+  "license": "MIT",
+  "author": "Mystia114514 <3039834694@qq.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mystia114514/Sparrow.git"
+  },
+  "keywords": [
+    "web-audio",
+    "midi",
+    "synthesizer",
+    "piano-roll",
+    "chiptune",
+    "bgm",
+    "sfx",
+    "zero-dependency",
+    "game-audio"
+  ],
+  "scripts": {
+    "test": "node tools/test-roundtrip.js && node tools/test-engine.js"
+  }
+}
